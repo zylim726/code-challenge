@@ -1,62 +1,80 @@
-import { ref, onMounted } from "vue";
-import type { Prices, PriceItem } from "../type/swap.type";
+import { ref, onMounted, onUnmounted } from "vue";
+import type { PriceItem, Prices } from "../type/tokenSelect.type";
 
-const LOCAL_TOKENS = ["SWTH", "BTC", "ETH", "USDT", "USDC", "OSMO", "ATOM"];
-
-const MOCK_PRICES: Prices = {
-  SWTH: 0.00403985,
-  BTC: 26002.82,
-  ETH: 1645.93,
-  USDT: 1,
-  USDC: 1,
-  OSMO: 0.3773,
-  ATOM: 7.18,
-};
-
-export function usePrices() {
+export function usePrices(refreshInterval = 10000) {
   const prices = ref<Prices>({});
   const tokens = ref<string[]>([]);
+  const loading = ref(false);
+
+  let intervalId: number | null = null;
 
   async function fetchPrices() {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000);
+      loading.value = true;
 
-      const res = await fetch("https://interview.switcheo.com/prices.json", {
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-
+      const res = await fetch("https://interview.switcheo.com/prices.json");
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+
       const data: PriceItem[] = await res.json();
 
-      // 过滤本地有 svg 的 token，取最新价格
-      const filtered: Prices = {};
-      const seen: Record<string, PriceItem> = {};
+      /*
+        latestMap purpose:
+        ------------------
+        Store ONLY the most recent price record for each token.
+
+        Because the API returns historical price records,
+        we must compare dates and keep the newest one.
+      */
+      const latestMap: Record<string, PriceItem> = {};
 
       data.forEach((item) => {
-        const token = item.currency;
-        if (LOCAL_TOKENS.includes(token)) {
-          const prev = seen[token];
-          if (!prev || new Date(item.date) > new Date(prev.date))
-            seen[token] = item;
+        const prev = latestMap[item.currency];
+
+        // If no record yet OR current item is newer
+        if (!prev || new Date(item.date) > new Date(prev.date)) {
+          latestMap[item.currency] = item;
         }
       });
 
-      Object.keys(seen).forEach((token) => {
-        filtered[token] = seen[token].price;
+      /*
+        Convert latestMap into simple:
+        { ETH: 3500, BNB: 600 }
+      */
+      const newPrices: Prices = {};
+
+      Object.keys(latestMap).forEach((token) => {
+        newPrices[token] = latestMap[token].price;
       });
 
-      prices.value = Object.keys(filtered).length ? filtered : MOCK_PRICES;
-      tokens.value = Object.keys(prices.value);
-    } catch {
-      console.warn("Fetch failed or timeout, using mock prices.");
-      prices.value = MOCK_PRICES;
-      tokens.value = Object.keys(prices.value);
+      /*
+        Only update state if prices actually changed.
+        Prevents unnecessary UI re-render.
+      */
+      if (JSON.stringify(newPrices) !== JSON.stringify(prices.value)) {
+        prices.value = newPrices;
+        tokens.value = Object.keys(newPrices);
+        console.log("Prices updated");
+      }
+    } catch (err) {
+      console.error("Fetch failed:", err);
+    } finally {
+      loading.value = false;
     }
   }
 
-  onMounted(fetchPrices);
+  onMounted(() => {
+    fetchPrices();
 
-  return { prices, tokens };
+    intervalId = window.setInterval(() => {
+      fetchPrices();
+    }, refreshInterval);
+  });
+
+  onUnmounted(() => {
+    if (intervalId) {
+      clearInterval(intervalId);
+    }
+  });
+
+  return { prices, tokens, loading };
 }
